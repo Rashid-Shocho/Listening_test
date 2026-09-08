@@ -38,7 +38,8 @@ def load_data(path: str) -> dict:
         return json.load(f)
 
 
-def run(input_path: str, test_ids: list[str] | None, output_dir: str, cache_dir: str) -> list[str]:
+def run(input_path: str, test_ids: list[str] | None, output_dir: str, cache_dir: str, dry: bool = False,
+        voice_seed: int | None = None) -> list[str]:
     data = load_data(input_path)
     all_tests = data.get("tests", {})
 
@@ -66,7 +67,7 @@ def run(input_path: str, test_ids: list[str] | None, output_dir: str, cache_dir:
 
         out_path = os.path.join(output_dir, f"{test_id}.mp3")
         try:
-            build_test_audio(test_id, sections, cache_dir, out_path)
+            build_test_audio(test_id, sections, cache_dir, out_path, dry=dry, voice_seed=voice_seed)
         except Exception as e:
             print(f"  !! FAILED to build {test_id}: {e}", file=sys.stderr)
             print(f"  Re-run the same command later -- already-synthesized lines are cached, "
@@ -86,12 +87,18 @@ def main():
     ap.add_argument("--all", action="store_true", help="Build every test found in the input file")
     ap.add_argument("--output-dir", default=config.OUTPUT_DIR)
     ap.add_argument("--cache-dir", default=config.CACHE_DIR)
+    ap.add_argument("--dry", action="store_true",
+                     help="Skip 30s silence markers and ambience overlay -- pure back-to-back "
+                          "speech, meant for you to hand-edit afterward (e.g. in Audiomass).")
+    ap.add_argument("--voice-seed", type=int, default=None,
+                     help="Seed the random voice assignment for a reproducible cast across "
+                          "repeated runs. Omit for a fresh random cast each run.")
     args = ap.parse_args()
 
     if not args.tests and not args.all:
         ap.error("Specify --tests TEST01 TEST02 ... or --all")
 
-    produced = run(args.input, args.tests, args.output_dir, args.cache_dir)
+    produced = run(args.input, args.tests, args.output_dir, args.cache_dir, dry=args.dry, voice_seed=args.voice_seed)
     print("\nDone. Produced:")
     for p in produced:
         print(" ", p)
@@ -99,3 +106,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

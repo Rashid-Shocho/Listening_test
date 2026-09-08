@@ -180,11 +180,16 @@ def parse_section_script(raw_text: str, section_prefix_hint: str = "") -> list:
         # Narrator line
         if line.startswith("NARRATOR:"):
             text, nxt_i = _clean_narrator_text(lines, i)
+            tag = None
+            if text:
+                tm = TAG_INLINE_RE.match(text)
+                if tm:
+                    tag, text = tm.group(1), tm.group(2).strip()
             if current is None:
                 current = Segment(name=f"{section_prefix_hint}_Narration")
                 segments.append(current)
             if text:
-                current.turns.append(Turn(kind="narrator", speaker="NARRATOR", text=text))
+                current.turns.append(Turn(kind="narrator", speaker="NARRATOR", tag=tag, text=text))
             i = nxt_i
             continue
 

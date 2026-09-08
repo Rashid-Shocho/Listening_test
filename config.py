@@ -1,9 +1,11 @@
 """
 Configuration for the IELTS Listening audio generation pipeline.
 
-Maps speaker names -> ElevenLabs voice_id + accent, per test.
-Edit VOICE_MAP to point at real ElevenLabs voice IDs from your account.
-(voice.elevenlabs.io -> Voice Library -> copy Voice ID)
+Speaker -> accent/gender profile, plus the accent+gender voice ID pools
+(from 11labs_voiceID.xlsx) that voice_assignment.py randomly draws from
+at the start of each test build. See voice_assignment.py for how a
+specific voice_id gets picked and kept consistent for a speaker across
+an entire test.
 """
 
 import os
@@ -31,31 +33,83 @@ ELEVENLABS_BASE_URL = "https://api.elevenlabs.io/v1"
 MOCK_MODE = not bool(ELEVENLABS_API_KEY)
 
 # ---------------------------------------------------------------------------
-# Voice mapping: speaker name -> (voice_id, accent, gender) per accent pool.
-# Fill in real ElevenLabs voice IDs here. Placeholder IDs are used in mock
-# mode and will simply be ignored.
+# Voice ID pools, by accent and gender -- from 11labs_voiceID.xlsx.
+# 1 = male, 0 = female in the source sheet.
+# voice_assignment.py randomly draws one voice_id per speaker (per test
+# build) from the pool matching that speaker's SPEAKER_PROFILES entry.
 # ---------------------------------------------------------------------------
-VOICE_POOL = {
-    "narrator": {"voice_id": "21m00Tcm4TlvDq8ikWAM", "accent": "en-GB", "desc": "Neutral IELTS narrator"},
-    # Test 1
-    "Emily": {"voice_id": "EXAVITQu4vr4xnSDxMaL", "accent": "en-GB", "desc": "Female, warm, British"},
-    "Daniel": {"voice_id": "TxGEqnHWrfWFTfGW9XjX", "accent": "en-GB", "desc": "Male, British"},
-    "Guide": {"voice_id": "XB0fDUnXU5powFXDhCwa", "accent": "en-AU", "desc": "Female, Australian"},
-    "Dr. Harris": {"voice_id": "onwK4e9ZLuTAKqWW03F9", "accent": "en-GB", "desc": "Male/Female supervisor"},
-    "Liam": {"voice_id": "pNInz6obpgDQGcFmaJgB", "accent": "en-GB", "desc": "Male, British"},
-    "Sofia": {"voice_id": "ThT5KcBeYPX3keUQqHPh", "accent": "en-GB", "desc": "Female, British"},
-    "Lecturer": {"voice_id": "flq6f7yk4E4fJM5XTYuZ", "accent": "en-GB", "desc": "Male/Female lecturer"},
-    # Test 2
-    "Mark": {"voice_id": "VR6AewLTigWG4xSOukaG", "accent": "en-US", "desc": "Male, American"},
-    "Nina": {"voice_id": "jsCqWAovK2LkecY7zXl4", "accent": "en-US", "desc": "Female, American"},
-    "Visitor Information Officer": {"voice_id": "21m00Tcm4TlvDq8ikWAM", "accent": "en-US", "desc": "Female, American"},
-    "Professor Bennett": {"voice_id": "onwK4e9ZLuTAKqWW03F9", "accent": "en-CA", "desc": "Male/Female, Canadian"},
-    "Alex": {"voice_id": "pNInz6obpgDQGcFmaJgB", "accent": "en-CA", "desc": "Male, Canadian"},
-    "Maya": {"voice_id": "ThT5KcBeYPX3keUQqHPh", "accent": "en-CA", "desc": "Female, Canadian"},
-    "University Lecturer": {"voice_id": "flq6f7yk4E4fJM5XTYuZ", "accent": "en-US", "desc": "Lecturer, American"},
+ACCENT_GENDER_POOLS = {
+    "British": {
+        "male": [
+            "Tx7VLgfksXHVnoY6jDGU", "aFyw0oiXW7dzKF4o7woX", "jRAAK67SEFE9m7ci5DhD",
+            "llNlEi50DSCIEuoOIaH7", "bPwYieWFNPo6MSKrfS6j", "lUTamkMw7gOzZbFIwmq4",
+            "ZVE5GaLwU3HuFONCXSPz", "P4DhdyNCB4Nl6MA0sL45", "fATgBRI8wg5KkDFg8vBd",
+            "VsQmyFHffusQDewmHB5v",
+        ],
+        "female": [
+            "kBag1HOZlaVBH7ICPE8x", "rqAWw1SQ1PYMM00B9ZTb", "1hlpeD1ydbI2ow0Tt3EW",
+            "1YfmfuouRyRwVbpAZP7R", "Op72Fm6dzjYuyMTp6FBl", "HXOwtW4XU7Ne6iOiDHTl",
+            "QqLi9iPR1Lu3I40qrGjU", "skNETUxpPRQlRrLwu88x",
+        ],
+    },
+    "Australian": {
+        "male": ["3DkcznWTIDSnX3f0J6DG", "gJaX474VQb1E5GJBSCPh", "QLOrGSLtlFUlfQRSaOtQ"],
+        "female": [
+            "ssxGjYJjpi2zZlztJhZU", "319bKIhetA5g6tmywrwj", "rSeWUeOepJe3YA3pacAe",
+            "tyZ2vPoArunQ8LpRQu6x", "Bu8XtNMginOxwiByyW2I", "TvYCW7acMEs9RZ2kkcBn",
+            "U9VgC8Xinl7nnNsyDd3J",
+        ],
+    },
+    "Canadian": {
+        "male": [
+            "DMljQdXAGELCjF2K6UHK", "klfO7uDt4WsjhNnhI2HZ", "y26Xv4PQ7Ftbu1mfaEFY",
+            "lAyepFdMFNSZ30LU9edN", "bBE6oKIBXZhM23o3YoXb", "mI8xLTBNjMXAf31I4xlB",
+            "w4Z9gYJrajAuQmheNbVn", "epkQ8pqDcY2DxhmFi8xl", "ZN36quYSeOCuxo0IhFKk",
+            "frBOG9T06d0Zw1PEvoZN",
+        ],
+        "female": ["JpjuQfOymR78GvGgYe0U", "ClKfJnuqp0hQ7Ax41F4w"],
+    },
+    "American": {
+        "male": [
+            "wBXNqKUATyqu0RtYt25i", "s3TPKV1kjDlVtZbl4Ksh", "8Ln42OXYupYsag45MAUy",
+            "ev2kMR9ZJZZsemuogS5u", "pVnrL6sighQX7hVz89cp", "J2FGlQG8Gd7x8uEDt2H8",
+            "1IKfgBmzdwnmAUPnryb3",
+        ],
+        "female": [
+            "k9KXsQFJqzAoomTCOrJB", "xFPwxsyzPJFEaL61n2ms", "PStJ2DzQnh8zxG5PDf1s",
+            "KWDD3Wyq30ZF5NEL01EJ", "rCuVrCHOUMY3OwyJBJym", "LJwPgeJYv0dNJzEtXVO6",
+            "Fc5CaIGWKvLHapoOSM2K", "K7W7zLWeGoxU9YqWoB7A", "DODLEQrClDo8wCz460ld",
+            "mC104ON19u9NruNfYC3j",
+        ],
+    },
 }
 
-DEFAULT_VOICE = {"voice_id": "21m00Tcm4TlvDq8ikWAM", "accent": "en-GB", "desc": "Fallback narrator voice"}
+# ---------------------------------------------------------------------------
+# Speaker -> accent/gender profile. voice_assignment.py uses this (not a
+# fixed voice_id) to decide which pool to draw a random voice from.
+# accent must be one of the ACCENT_GENDER_POOLS keys above.
+# ---------------------------------------------------------------------------
+SPEAKER_PROFILES = {
+    "narrator": {"accent": "British", "gender": "female", "desc": "Neutral IELTS narrator"},
+    # TEST1 -- Mock Test 1, trimmed emotive edition
+    "Emma": {"accent": "Australian", "gender": "female", "desc": "Community arts centre receptionist"},
+    "Daniel": {"accent": "British", "gender": "male", "desc": "Prospective class member"},
+    "Claire": {"accent": "Canadian", "gender": "female", "desc": "Museum guide"},
+    "Dr. Morris": {"accent": "British", "gender": "female", "desc": "University supervisor"},
+    "Adam": {"accent": "Australian", "gender": "male", "desc": "Student"},
+    "Sofia": {"accent": "American", "gender": "female", "desc": "Student"},
+    "Lecturer": {"accent": "British", "gender": "male", "desc": "Section 4 lecturer"},
+    # TEST2 -- sample data shipped in the repo
+    "Mark": {"accent": "American", "gender": "male", "desc": "Sports centre receptionist"},
+    "Nina": {"accent": "American", "gender": "female", "desc": "Prospective member"},
+    "Visitor Information Officer": {"accent": "American", "gender": "female", "desc": "Heritage centre officer"},
+    "Professor Bennett": {"accent": "Canadian", "gender": "male", "desc": "University supervisor"},
+    "Alex": {"accent": "Canadian", "gender": "male", "desc": "Student"},
+    "Maya": {"accent": "Canadian", "gender": "female", "desc": "Student"},
+    "University Lecturer": {"accent": "American", "gender": "male", "desc": "Section 4 lecturer"},
+}
+
+DEFAULT_PROFILE = {"accent": "British", "gender": "female", "desc": "Fallback voice for an unlisted speaker"}
 
 # ElevenLabs voice_settings per delivery tag family (rough emotional mapping).
 # v3 supports more expressive control; stability/similarity approximate it.

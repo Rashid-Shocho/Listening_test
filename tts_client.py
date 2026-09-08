@@ -28,15 +28,16 @@ def _voice_settings_for_tag(tag: str | None) -> dict:
     return config.TAG_SETTINGS.get((tag or "").lower(), config.TAG_SETTINGS["default"])
 
 
-def synthesize_line(text: str, speaker: str, tag: str | None, cache_dir: str) -> AudioSegment:
+def synthesize_line(text: str, voice_id: str, tag: str | None, cache_dir: str) -> AudioSegment:
     """
     Returns an AudioSegment for one line of dialogue/narration. Uses a
-    filesystem cache keyed on (speaker, tag, text, voice_id) so re-running
-    the pipeline doesn't re-synthesize unchanged lines.
+    filesystem cache keyed on (voice_id, tag, text) so re-running the
+    pipeline doesn't re-synthesize unchanged lines. voice_id is resolved
+    by the caller (see voice_assignment.py) -- one fixed voice per speaker
+    for the whole test, not looked up per-line here.
     """
     os.makedirs(cache_dir, exist_ok=True)
-    voice = config.VOICE_POOL.get(speaker, config.DEFAULT_VOICE)
-    cache_key = f"{voice['voice_id']}::{tag}::{text}"
+    cache_key = f"{voice_id}::{tag}::{text}"
     path = _cache_path(cache_dir, cache_key)
 
     if os.path.exists(path):
@@ -45,7 +46,7 @@ def synthesize_line(text: str, speaker: str, tag: str | None, cache_dir: str) ->
     if config.MOCK_MODE:
         audio = _mock_tts(text)
     else:
-        audio = _elevenlabs_tts(text, voice["voice_id"], tag)
+        audio = _elevenlabs_tts(text, voice_id, tag)
 
     audio.export(path, format="mp3")
     return audio
