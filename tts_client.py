@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import io
 import os
+import re
 import time
 
 import requests
@@ -19,13 +20,102 @@ from pydub.generators import Sine
 import config
 
 
+def _apply_contractions(text: str) -> str:
+    """
+    Light, safe contraction pass applied only to the text sent to the TTS
+    API -- never touches the stored script/answer-key text. Improves
+    natural speech flow ("I'll" instead of "I will") without risking the
+    exact-wording integrity your scripts are QC'd for, since this only
+    happens at synthesis time on a throwaway copy of the string.
+
+    Deliberately conservative: only common, unambiguous contractions,
+    matched whole-word and case-preserving. Skip this by setting
+    config.ENABLE_CONTRACTIONS = False if you ever need verbatim delivery
+    (e.g. a line where "will not" needs the emphasis "will" carries).
+    """
+    if not config.ENABLE_CONTRACTIONS:
+        return text
+
+    pairs = [
+        # Negations first -- must run before the plain "subject will/are/have"
+        # rules below, or e.g. "we will not" gets mangled into "we'll not"
+        # instead of "we won't" (the plain rule fires first and consumes
+        # "will" before the negative pattern ever sees it).
+        (r"\bwill not\b", "won't"), (r"\bcannot\b", "can't"), (r"\bcan not\b", "can't"),
+        (r"\bdo not\b", "don't"), (r"\bdoes not\b", "doesn't"), (r"\bdid not\b", "didn't"),
+        (r"\bwould not\b", "wouldn't"), (r"\bshould not\b", "shouldn't"),
+        (r"\bis not\b", "isn't"), (r"\bare not\b", "aren't"), (r"\bwas not\b", "wasn't"),
+        (r"\bwere not\b", "weren't"), (r"\bhave not\b", "haven't"), (r"\bhas not\b", "hasn't"),
+        # Plain subject contractions
+        (r"\bI will\b", "I'll"), (r"\bI am\b", "I'm"), (r"\bI have\b", "I've"),
+        (r"\bI would\b", "I'd"), (r"\byou will\b", "you'll"), (r"\byou are\b", "you're"),
+        (r"\byou have\b", "you've"), (r"\bwe will\b", "we'll"), (r"\bwe are\b", "we're"),
+        (r"\bwe have\b", "we've"), (r"\bthey will\b", "they'll"), (r"\bthey are\b", "they're"),
+        (r"\bhe will\b", "he'll"), (r"\bshe will\b", "she'll"), (r"\bit will\b", "it'll"),
+        (r"\bit is\b", "it's"), (r"\bthat is\b", "that's"), (r"\bthat will\b", "that'll"),
+        (r"\blet us\b", "let's"), (r"\bthere is\b", "there's"), (r"\bwho is\b", "who's"),
+    ]
+
+    def _repl(pattern, repl, s):
+        def match_case(m):
+            word = m.group(0)
+            if word[0].isupper():
+                return repl[0].upper() + repl[1:]
+            return repl
+        return re.sub(pattern, match_case, s, flags=re.IGNORECASE)
+
+    for pattern, repl in pairs:
+        text = _repl(pattern, repl, text)
+    return text
+
+
 def _cache_path(cache_dir: str, key: str) -> str:
     h = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
     return os.path.join(cache_dir, f"{h}.mp3")
 
 
-def _voice_settings_for_tag(tag: str | None) -> dict:
-    return config.TAG_SETTINGS.get((tag or "").lower(), config.TAG_SETTINGS["default"])
+def _voice_settings(voice_id: str | None = None) -> dict:
+    """
+    Settings profile for a line. Eleven v3's actual expressiveness comes
+    mainly from the [tags] embedded in the text (see _tagged_text below),
+    not from stability/style alone -- but not every voice_id responds to
+    those tags equally well. Some voices (especially older/IVC ones) stay
+    flat regardless of tags; if you find one of those, add its voice_id to
+    config.VOICE_SETTINGS_OVERRIDES to push it harder (lower stability,
+    higher style) without changing every other voice's settings.
+    """
+    if voice_id and voice_id in config.VOICE_SETTINGS_OVERRIDES:
+        return config.VOICE_SETTINGS_OVERRIDES[voice_id]
+    return config.DEFAULT_VOICE_SETTINGS
+
+
+def _tagged_text(text: str, tag: str | None) -> str:
+    """
+    Eleven v3 reads performance direction from a specific trained
+    vocabulary of tags written directly in the input text, e.g.
+    "[happy] Good morning, ...". Your script's tags are free-form
+    director's notes ("warm, welcoming", "measured, cautionary",
+    "a little tentative"), most of which are NOT real v3 tags -- forwarding
+    them verbatim has undefined behavior and is a plausible cause of
+    unexpected artifacts (including an extra voice appearing) since v3 can
+    misread an unrecognized bracketed token as a scene/speaker cue rather
+    than a delivery direction. Only tags that map to config.TAG_ALIAS_MAP's
+    known-safe v3 vocabulary are sent; anything else is dropped and the
+    line is synthesized with plain delivery (stability/style still apply).
+    """
+    text = _apply_contractions(text)
+    if not tag:
+        return text
+    raw_parts = [p.strip() for p in tag.split(",") if p.strip()]
+    mapped = []
+    for p in raw_parts:
+        m = config._map_one_tag(p)
+        if m and m not in mapped:
+            mapped.append(m)
+    if not mapped:
+        return text
+    prefix = "".join(f"[{p}]" for p in mapped)
+    return f"{prefix} {text}"
 
 
 def synthesize_line(text: str, voice_id: str, tag: str | None, cache_dir: str) -> AudioSegment:
@@ -37,7 +127,7 @@ def synthesize_line(text: str, voice_id: str, tag: str | None, cache_dir: str) -
     for the whole test, not looked up per-line here.
     """
     os.makedirs(cache_dir, exist_ok=True)
-    cache_key = f"{voice_id}::{tag}::{text}"
+    cache_key = f"{voice_id}::{tag}::{text}::ct{int(config.ENABLE_CONTRACTIONS)}"
     path = _cache_path(cache_dir, cache_key)
 
     if os.path.exists(path):
@@ -78,9 +168,9 @@ def _elevenlabs_tts(text: str, voice_id: str, tag: str | None) -> AudioSegment:
         "Accept": "audio/mpeg",
     }
     payload = {
-        "text": text,
+        "text": _tagged_text(text, tag),
         "model_id": config.ELEVENLABS_MODEL_ID,
-        "voice_settings": _voice_settings_for_tag(tag),
+        "voice_settings": _voice_settings(voice_id),
     }
 
     max_attempts = 5

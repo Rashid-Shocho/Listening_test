@@ -278,7 +278,16 @@ def split_source_notes_by_section(test_id: str, source_notes: str) -> dict:
     """
     bounds = {}
     for sec_num in (1, 2, 3, 4):
-        pat = re.compile(rf"{re.escape(test_id)}_Sec{sec_num}_\w*Intro_Voice")
+        # IGNORECASE is essential: testId is always uppercase ("TEST04"),
+        # but the literal filename markers embedded in the script text are
+        # mixed-case ("Test04_Sec1_Intro_Voice.mp3"). Without this flag,
+        # the match NEVER succeeds for any test/section, the "bounds[1] =
+        # 0" fallback below silently swallows the ENTIRE test's text as
+        # "section 1" (sections 2-4 then separately fall back to their own
+        # correctly-scoped "script" fields) -- which is exactly how a
+        # single 2-person Section 1 conversation ends up with every
+        # speaker from every other section of the test mixed in.
+        pat = re.compile(rf"{re.escape(test_id)}_Sec{sec_num}_\w*Intro_Voice", re.IGNORECASE)
         m = pat.search(source_notes)
         if m:
             bounds[sec_num] = m.start()

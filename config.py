@@ -32,6 +32,11 @@ ELEVENLABS_BASE_URL = "https://api.elevenlabs.io/v1"
 # be exercised end-to-end and validated before spending API credits.
 MOCK_MODE = not bool(ELEVENLABS_API_KEY)
 
+# Rewrite formal phrasing ("I will", "do not") to natural contractions
+# ("I'll", "don't") in the text sent to the TTS API only -- never touches
+# your stored script/answer-key text. Set False for verbatim delivery.
+ENABLE_CONTRACTIONS = True
+
 # ---------------------------------------------------------------------------
 # Voice ID pools, by accent and gender -- from 11labs_voiceID.xlsx.
 # 1 = male, 0 = female in the source sheet.
@@ -111,47 +116,107 @@ SPEAKER_PROFILES = {
 
 DEFAULT_PROFILE = {"accent": "British", "gender": "female", "desc": "Fallback voice for an unlisted speaker"}
 
-# ElevenLabs voice_settings per delivery tag family (rough emotional mapping).
-# v3 supports more expressive control; stability/similarity approximate it.
-TAG_SETTINGS = {
-    "default": {"stability": 0.45, "similarity_boost": 0.80, "style": 0.30},
-    "warm": {"stability": 0.40, "similarity_boost": 0.80, "style": 0.45},
-    "hesitant": {"stability": 0.35, "similarity_boost": 0.78, "style": 0.35},
-    "curious": {"stability": 0.42, "similarity_boost": 0.80, "style": 0.35},
-    "reassuring": {"stability": 0.45, "similarity_boost": 0.82, "style": 0.30},
-    "practical": {"stability": 0.50, "similarity_boost": 0.80, "style": 0.20},
-    "clear": {"stability": 0.50, "similarity_boost": 0.82, "style": 0.15},
-    "quick": {"stability": 0.38, "similarity_boost": 0.78, "style": 0.40},
-    "confident": {"stability": 0.48, "similarity_boost": 0.82, "style": 0.30},
-    "agreeing": {"stability": 0.45, "similarity_boost": 0.80, "style": 0.25},
-    "considering": {"stability": 0.42, "similarity_boost": 0.80, "style": 0.30},
-    "thoughtful": {"stability": 0.42, "similarity_boost": 0.80, "style": 0.30},
-    "grateful": {"stability": 0.45, "similarity_boost": 0.82, "style": 0.35},
-    "soft": {"stability": 0.50, "similarity_boost": 0.82, "style": 0.20},
-    "concluding": {"stability": 0.50, "similarity_boost": 0.82, "style": 0.20},
-    "measured": {"stability": 0.55, "similarity_boost": 0.82, "style": 0.15},
-    "reflective": {"stability": 0.50, "similarity_boost": 0.82, "style": 0.25},
+# ElevenLabs voice_settings applied to every line. With Eleven v3, actual
+# emotional/contextual delivery comes from [tags] embedded directly in the
+# text (see tts_client._tagged_text) -- these settings just control how
+# much the model can vary from the base voice around that direction.
+# Lower stability = more expressive/variable (can sound more "alive" and
+# less robotic); higher stability = flatter, more monotone, more robotic.
+# 0.30-0.35 is a good starting point for natural, non-robotic delivery.
+DEFAULT_VOICE_SETTINGS = {
+    "stability": 0.32,
+    "similarity_boost": 0.85,
+    "style": 0.55,
+    "use_speaker_boost": True,
 }
 
+# Deprecated: no longer used (multi-word tags like "warm, welcoming" never
+# matched these single-word keys, so every line silently fell back to
+# "default" regardless of context -- that was the source of the flat,
+# robotic delivery). Kept only so nothing else importing this breaks.
+TAG_SETTINGS = {"default": DEFAULT_VOICE_SETTINGS}
+
+# Per-voice_id overrides. If a specific voice sounds flat/robotic no
+# matter what tags it's given (some voices just don't respond much to
+# eleven_v3 emotion tags), add its voice_id here with more aggressive
+# settings instead of touching DEFAULT_VOICE_SETTINGS for everyone.
+# Example, after identifying a weak female voice_id in the Voice Lab:
+#   VOICE_SETTINGS_OVERRIDES = {
+#       "kBag1HOZlaVBH7ICPE8x": {"stability": 0.20, "similarity_boost": 0.80,
+#                                  "style": 0.75, "use_speaker_boost": True},
+#   }
+VOICE_SETTINGS_OVERRIDES: dict[str, dict] = {}
+
 # ---------------------------------------------------------------------------
-# Timing / audio constants
+# Eleven v3 tag safety.
+#
+# Your scripts' delivery tags (e.g. "measured, cautionary", "explaining,
+# adjusting", "content, brief", "a little tentative") were written as
+# free-form director's notes for a human voice actor -- NOT as literal
+# Eleven v3 audio tags. v3 only recognizes a specific trained vocabulary
+# (a subset of the emotions/actions below). Sending it an unrecognized
+# bracketed string like "[explaining][adjusting]" or "[a little
+# tentative]" has undefined behavior -- at best it's silently ignored, at
+# worst the model can misread it as a speaker/scene-change cue (v3 was
+# also trained on multi-character scripts using bracket syntax), which is
+# a plausible concrete mechanism for an unexpected extra voice appearing
+# mid-clip even though the actual script only specifies your real cast.
+#
+# TAG_ALIAS_MAP maps a script tag (lowercased) to the nearest real,
+# recognized v3 tag. Anything NOT in this map is dropped entirely rather
+# than forwarded verbatim -- better to fall back to plain stability/style
+# delivery for an unmapped tag than risk sending v3 an unrecognized
+# bracketed token. Extend this map as you identify more useful matches.
+SUPPORTED_V3_TAGS = {
+    "happy", "sad", "angry", "excited", "curious", "surprised", "scared",
+    "whispers", "shouts", "sighs", "laughs", "crying", "sarcastic",
+    "mischievously", "nervous", "confident", "tired", "disgusted",
+}
+
+TAG_ALIAS_MAP = {
+    "warm": None, "welcoming": "happy", "friendly": "happy",
+    "helpful": None, "curious": "curious", "thoughtful": None,
+    "encouraging": "happy", "pleased": "happy", "delighted": "excited",
+    "confirming": None, "hopeful": "excited", "precise": None,
+    "acknowledging": None, "informative": None, "descriptive": None,
+    "reassuring": None, "surprised": "surprised", "accepting": None,
+    "decisive": None, "satisfied": "happy", "brisk": None,
+    "businesslike": None, "careful": None, "calculating": None,
+    "relieved": "happy", "apologetic": "sad", "grateful": "happy",
+    "closing": None, "concluding": None, "warm, closing": None,
+    "clear": None, "matter-of-fact": None, "steady": None, "guiding": None,
+    "confident": "confident", "presenting": None, "proud": "confident",
+    "reflective": None, "gentle": None, "cautionary": "nervous",
+    "transitional": None, "engaging": "excited", "contrasting": None,
+    "explanatory": None, "measured": None, "emphatic": None,
+    "impressed": "surprised", "balanced": None, "forward-looking": None,
+    "illustrative": None, "rhetorical": None, "intrigued": "curious",
+    "warm, engaging": "happy", "organizing": None, "probing": "curious",
+    "recalling": None, "conceding": None, "explaining": None,
+    "adjusting": None, "disagreeing": None, "firm": "angry",
+    "gently teasing": "mischievously", "brief": None, "content": "happy",
+    "calm": None, "final": None, "announcer": None, "quick": None,
+    "considering": None, "agreeing": None, "hesitant": "nervous",
+    "tentative": "nervous", "a little tentative": "nervous",
+    "friendly, a little tentative": "nervous",
+}
+
+
+def _map_one_tag(raw: str) -> str | None:
+    key = raw.strip().lower()
+    if key in TAG_ALIAS_MAP:
+        return TAG_ALIAS_MAP[key]
+    if key in SUPPORTED_V3_TAGS:
+        return key
+    return None
+
 # ---------------------------------------------------------------------------
-SILENCE_MARKER_MS = 30_000          # "30 SECONDS OF SILENCE" production marker
+# Timing constants
+# ---------------------------------------------------------------------------
+# "30 SECONDS OF SILENCE" markers in the source scripts are skipped entirely
+# -- no dead air is inserted anywhere in the generated audio.
 GAP_BETWEEN_TURNS_MS = 450          # natural pause between speaker turns
 GAP_AFTER_NARRATOR_MS = 700
-AMBIENCE_DB_RELATIVE = -23          # target ambience level relative to speech (approx -22 to -24dB)
-CROSSFADE_MS = 300                  # crossfade between merged section files
-
-# Ambience beds: section -> generated/looped background file (wav) in ./ambience/
-# You may replace these with real room-tone recordings. If absent, the
-# pipeline auto-generates soft pink-noise-like ambience as a stand-in.
-AMBIENCE_DESCRIPTIONS = {
-    1: "Quiet community arts-centre / sports-centre reception. Room tone, faint footsteps.",
-    2: "Quiet library / heritage-centre foyer. Room tone, occasional footsteps.",
-    3: "Quiet university seminar room. Faint ventilation, paper movement.",
-    4: "Quiet university lecture theatre. Low HVAC, occasional chair movement.",
-}
 
 OUTPUT_DIR = "output"
 CACHE_DIR = "cache"
-AMBIENCE_DIR = "ambience"
