@@ -1,6 +1,37 @@
+$gi = @"
+# --- Secrets (never commit your ElevenLabs key) ---
 .env
-cache/
-output/
-__pycache__/
+.env.*
+!.env.example
+
+# --- Python virtual environment ---
 venv/
- 
+.venv/
+env/
+
+# --- Python build / cache files ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# --- Pipeline output and caches ---
+output/
+cache/
+cache_old/
+*.mp3
+*.wav
+
+# --- One-off helpers / backups ---
+backup_before_update/
+update_listening_test.py
+*.zip
+
+# --- Editor / OS files ---
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
+.DS_Store
+"@
+[IO.File]::WriteAllText("$PWD\.gitignore", $gi, (New-Object System.Text.UTF8Encoding $false))

@@ -268,25 +268,8 @@ def parse_section_script(raw_text: str, section_prefix_hint: str = "") -> list:
 
 
 def split_source_notes_by_section(test_id: str, source_notes: str) -> dict:
-    """
-    sourceNotes holds the *whole* test's script concatenated. Some per-section
-    "script" fields in the source JSON are truncated or corrupted (seen in
-    the sample data for TEST02/section1), so sourceNotes is the more
-    reliable source of truth. We slice it into 4 chunks using the first
-    occurrence of each section's "_Sec{n}_Intro_Voice" (or, for section 1,
-    the very start of the text) as boundaries.
-    """
     bounds = {}
     for sec_num in (1, 2, 3, 4):
-        # IGNORECASE is essential: testId is always uppercase ("TEST04"),
-        # but the literal filename markers embedded in the script text are
-        # mixed-case ("Test04_Sec1_Intro_Voice.mp3"). Without this flag,
-        # the match NEVER succeeds for any test/section, the "bounds[1] =
-        # 0" fallback below silently swallows the ENTIRE test's text as
-        # "section 1" (sections 2-4 then separately fall back to their own
-        # correctly-scoped "script" fields) -- which is exactly how a
-        # single 2-person Section 1 conversation ends up with every
-        # speaker from every other section of the test mixed in.
         pat = re.compile(rf"{re.escape(test_id)}_Sec{sec_num}_\w*Intro_Voice", re.IGNORECASE)
         m = pat.search(source_notes)
         if m:
@@ -303,13 +286,6 @@ def split_source_notes_by_section(test_id: str, source_notes: str) -> dict:
 
 
 def parse_test(test_obj: dict) -> dict:
-    """
-    Given one test's dict, return {section_number: [Segment, ...]}.
-
-    Prefers sourceNotes (full, more reliable script text) when available and
-    it actually contains recognizable dialogue for a section; falls back to
-    the per-section "script" field otherwise.
-    """
     out = {}
     test_id = test_obj.get("testId", "TEST")
     sections = test_obj.get("sections", {})
@@ -325,8 +301,6 @@ def parse_test(test_obj: dict) -> dict:
         if sec_num in chunks:
             segs = parse_section_script(chunks[sec_num], section_prefix_hint=prefix)
 
-        # Fall back to the per-section "script" field if sourceNotes gave us
-        # nothing usable (no speech/narrator turns) for this section.
         has_speech = any(t.kind in ("speech", "narrator") for s in segs for t in s.turns)
         if not has_speech:
             script = sec.get("script", "")

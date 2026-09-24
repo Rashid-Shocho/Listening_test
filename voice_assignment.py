@@ -1,17 +1,17 @@
 """
 Randomized-but-consistent voice assignment.
 
-Each speaker appearing anywhere in a test is assigned exactly one random
-voice_id -- drawn from config.ACCENT_GENDER_POOLS using that speaker's
-accent/gender in config.SPEAKER_PROFILES -- once, at the start of that
-test's build. That same voice_id is then reused for every line that
-speaker has anywhere in the test (every section it appears in), so no
-one's voice drifts or swaps mid-test. The narrator gets one voice for
-the whole test the same way everyone else does.
+Each speaker in a test gets exactly one voice_id for the whole test, drawn
+from config.ACCENT_GENDER_POOLS using that speaker's accent/gender. The
+accent/gender comes from the test's own "speakers" block in the JSON (so the
+same label, e.g. "Arts Centre Guide", can be female in one test and male in
+another), falling back to config.SPEAKER_PROFILES.
 
-Two different tests, or two runs of the same test, get freshly randomized
-voices by default (nothing is hardcoded) -- pass `seed` if you want a
-specific run to be reproducible.
+The narrator is the exception: it always gets config.NARRATOR_VOICE_ID, the
+same voice in every test.
+
+Pass `seed` (main.py --voice-seed) to get the same cast on every run, which
+also lets the cache be reused instead of paying for the lines again.
 """
 
 from __future__ import annotations
@@ -21,60 +21,52 @@ import random
 import config
 
 
-def _profile_for(speaker: str) -> dict:
-    if speaker in config.SPEAKER_PROFILES:
-        return config.SPEAKER_PROFILES[speaker]
-    lower = speaker.lower()
-    for name, profile in config.SPEAKER_PROFILES.items():
-        if name.lower() == lower:
-            return profile
+def _profile_for(speaker: str, profiles: dict | None = None) -> dict:
+    for table in (profiles or {}, config.SPEAKER_PROFILES):
+        if speaker in table:
+            return table[speaker]
+        lower = speaker.lower()
+        for name, profile in table.items():
+            if name.lower() == lower:
+                return profile
     return config.DEFAULT_PROFILE
 
 
-def _pick_voice_id(accent: str, gender: str, used: set) -> str:
+def _pick_voice_id(accent: str, gender: str, used: set, rng: random.Random) -> str:
     pool = config.ACCENT_GENDER_POOLS.get(accent, {}).get(gender, [])
-    if not pool:
-        # That accent/gender combo is empty in the sheet (e.g. Canadian
-        # female only has 2 entries) -- fall back to the other gender in
-        # the same accent rather than crashing.
-        other = "female" if gender == "male" else "male"
-        pool = config.ACCENT_GENDER_POOLS.get(accent, {}).get(other, [])
     if not pool:
         pool = config.ACCENT_GENDER_POOLS.get("British", {}).get(gender, [])
     if not pool:
-        raise RuntimeError(f"No voice IDs available anywhere for accent={accent} gender={gender}")
+        raise RuntimeError(f"No voice IDs available for accent={accent} gender={gender}")
+    # Prefer a voice nobody else in this test has, so two characters never share one.
+    candidates = [v for v in pool if v not in used]
+    if not candidates:
+        # Pool exhausted (e.g. only 2 Canadian female voices): borrow an unused
+        # voice of the same gender from another accent rather than reuse one.
+        for acc, genders in config.ACCENT_GENDER_POOLS.items():
+            candidates = [v for v in genders.get(gender, []) if v not in used]
+            if candidates:
+                break
+    return rng.choice(candidates or pool)
 
-    # Prefer a voice nobody else in this test already has, so two
-    # characters don't end up sounding identical by chance -- but don't
-    # hard-fail if the cast is bigger than the pool.
-    candidates = [v for v in pool if v not in used] or pool
-    return random.choice(candidates)
 
-
-def assign_test_voices(speaker_names, seed: int | None = None) -> dict:
-    """
-    speaker_names: iterable of every speaker string that appears anywhere
-    in the test (as literally written in the parsed turns, e.g. "NARRATOR",
-    "Emma", "Dr. Morris").
-
-    Returns {speaker_name: voice_id} -- one fixed voice per speaker, valid
-    for the whole test regardless of how many sections they appear in.
-    """
-    prior_state = random.getstate()
-    if seed is not None:
-        random.seed(seed)
-    try:
-        assignment: dict = {}
-        used: set = set()
-        for speaker in sorted(set(speaker_names)):
-            profile = _profile_for(speaker)
-            voice_id = _pick_voice_id(profile["accent"], profile["gender"], used)
-            assignment[speaker] = voice_id
-            used.add(voice_id)
-        return assignment
-    finally:
-        if seed is not None:
-            random.setstate(prior_state)
+def assign_test_voices(speaker_names, seed: int | None = None, profiles: dict | None = None) -> dict:
+    """Returns {speaker_name: voice_id}, fixed for the whole test."""
+    rng = random.Random(seed)
+    assignment: dict = {}
+    used: set = set()
+    narrator_id = getattr(config, "NARRATOR_VOICE_ID", None)
+    if narrator_id:
+        used.add(narrator_id)          # reserved: no character ever gets the narrator's voice
+    for speaker in sorted(set(speaker_names)):
+        if narrator_id and speaker.upper() == "NARRATOR":
+            assignment[speaker] = narrator_id
+            continue
+        profile = _profile_for(speaker, profiles)
+        voice_id = _pick_voice_id(profile["accent"], profile["gender"], used, rng)
+        assignment[speaker] = voice_id
+        used.add(voice_id)
+    return assignment
 
 
 def collect_speakers(sections: dict) -> set:

@@ -1,14 +1,14 @@
 """
 Thin wrapper around the ElevenLabs text-to-speech REST API, with a MOCK
-fallback (silence of a plausible duration) so the rest of the pipeline can
-be developed/tested without burning API credits or requiring network
-access to elevenlabs.io from this environment.
+fallback (a quiet placeholder hum of plausible duration) so the rest of the
+pipeline can be tested without spending API credits.
 """
 
 from __future__ import annotations
 
 import hashlib
 import io
+import json
 import os
 import re
 import time
@@ -21,32 +21,16 @@ import config
 
 
 def _apply_contractions(text: str) -> str:
-    """
-    Light, safe contraction pass applied only to the text sent to the TTS
-    API -- never touches the stored script/answer-key text. Improves
-    natural speech flow ("I'll" instead of "I will") without risking the
-    exact-wording integrity your scripts are QC'd for, since this only
-    happens at synthesis time on a throwaway copy of the string.
-
-    Deliberately conservative: only common, unambiguous contractions,
-    matched whole-word and case-preserving. Skip this by setting
-    config.ENABLE_CONTRACTIONS = False if you ever need verbatim delivery
-    (e.g. a line where "will not" needs the emphasis "will" carries).
-    """
+    """Conservative contraction pass on the text sent to the API only."""
     if not config.ENABLE_CONTRACTIONS:
         return text
 
     pairs = [
-        # Negations first -- must run before the plain "subject will/are/have"
-        # rules below, or e.g. "we will not" gets mangled into "we'll not"
-        # instead of "we won't" (the plain rule fires first and consumes
-        # "will" before the negative pattern ever sees it).
         (r"\bwill not\b", "won't"), (r"\bcannot\b", "can't"), (r"\bcan not\b", "can't"),
         (r"\bdo not\b", "don't"), (r"\bdoes not\b", "doesn't"), (r"\bdid not\b", "didn't"),
         (r"\bwould not\b", "wouldn't"), (r"\bshould not\b", "shouldn't"),
         (r"\bis not\b", "isn't"), (r"\bare not\b", "aren't"), (r"\bwas not\b", "wasn't"),
         (r"\bwere not\b", "weren't"), (r"\bhave not\b", "haven't"), (r"\bhas not\b", "hasn't"),
-        # Plain subject contractions
         (r"\bI will\b", "I'll"), (r"\bI am\b", "I'm"), (r"\bI have\b", "I've"),
         (r"\bI would\b", "I'd"), (r"\byou will\b", "you'll"), (r"\byou are\b", "you're"),
         (r"\byou have\b", "you've"), (r"\bwe will\b", "we'll"), (r"\bwe are\b", "we're"),
@@ -75,34 +59,19 @@ def _cache_path(cache_dir: str, key: str) -> str:
 
 
 def _voice_settings(voice_id: str | None = None) -> dict:
-    """
-    Settings profile for a line. Eleven v3's actual expressiveness comes
-    mainly from the [tags] embedded in the text (see _tagged_text below),
-    not from stability/style alone -- but not every voice_id responds to
-    those tags equally well. Some voices (especially older/IVC ones) stay
-    flat regardless of tags; if you find one of those, add its voice_id to
-    config.VOICE_SETTINGS_OVERRIDES to push it harder (lower stability,
-    higher style) without changing every other voice's settings.
-    """
     if voice_id and voice_id in config.VOICE_SETTINGS_OVERRIDES:
         return config.VOICE_SETTINGS_OVERRIDES[voice_id]
     return config.DEFAULT_VOICE_SETTINGS
 
 
+def _seed_for(voice_id: str | None) -> int | None:
+    if voice_id and voice_id == getattr(config, "NARRATOR_VOICE_ID", None):
+        return getattr(config, "NARRATOR_SEED", None)
+    return None
+
+
 def _tagged_text(text: str, tag: str | None) -> str:
-    """
-    Eleven v3 reads performance direction from a specific trained
-    vocabulary of tags written directly in the input text, e.g.
-    "[happy] Good morning, ...". Your script's tags are free-form
-    director's notes ("warm, welcoming", "measured, cautionary",
-    "a little tentative"), most of which are NOT real v3 tags -- forwarding
-    them verbatim has undefined behavior and is a plausible cause of
-    unexpected artifacts (including an extra voice appearing) since v3 can
-    misread an unrecognized bracketed token as a scene/speaker cue rather
-    than a delivery direction. Only tags that map to config.TAG_ALIAS_MAP's
-    known-safe v3 vocabulary are sent; anything else is dropped and the
-    line is synthesized with plain delivery (stability/style still apply).
-    """
+    """Contractions + only the safe v3 tags (see config.SAFE_OUTPUT_TAGS)."""
     text = _apply_contractions(text)
     if not tag:
         return text
@@ -120,14 +89,14 @@ def _tagged_text(text: str, tag: str | None) -> str:
 
 def synthesize_line(text: str, voice_id: str, tag: str | None, cache_dir: str) -> AudioSegment:
     """
-    Returns an AudioSegment for one line of dialogue/narration. Uses a
-    filesystem cache keyed on (voice_id, tag, text) so re-running the
-    pipeline doesn't re-synthesize unchanged lines. voice_id is resolved
-    by the caller (see voice_assignment.py) -- one fixed voice per speaker
-    for the whole test, not looked up per-line here.
+    Returns an AudioSegment for one request. Cached on disk, keyed on voice,
+    tag, text, model and voice settings -- so changing settings or model
+    re-synthesizes instead of silently reusing old clips.
     """
     os.makedirs(cache_dir, exist_ok=True)
-    cache_key = f"{voice_id}::{tag}::{text}::ct{int(config.ENABLE_CONTRACTIONS)}"
+    cache_key = (f"{voice_id}::{tag}::{text}::ct{int(config.ENABLE_CONTRACTIONS)}"
+                 f"::{config.ELEVENLABS_MODEL_ID}::{json.dumps(_voice_settings(voice_id), sort_keys=True)}"
+                 f"::seed{_seed_for(voice_id)}::mock{int(config.MOCK_MODE)}")
     path = _cache_path(cache_dir, cache_key)
 
     if os.path.exists(path):
@@ -143,18 +112,10 @@ def synthesize_line(text: str, voice_id: str, tag: str | None, cache_dir: str) -
 
 
 def _mock_tts(text: str) -> AudioSegment:
-    """
-    Stand-in for real speech: silent clip whose duration approximates how
-    long the line would take to speak (~150 words/min, floor 500ms), so
-    downstream timing/assembly logic can be validated realistically.
-    """
-    words = max(1, len(text.split()))
+    words = max(1, len(re.sub(r"\[[^\]]*\]", "", text).split()))
     seconds = max(0.5, words / 2.5)  # ~150 wpm
     ms = int(seconds * 1000)
-    # Use near-silent low hum instead of dead silence so it's audible in
-    # a scrub-through QA pass that this *is* a placeholder, not a bug.
-    tone = Sine(90).to_audio_segment(duration=ms).apply_gain(-45)
-    return tone
+    return Sine(90).to_audio_segment(duration=ms).apply_gain(-45)
 
 
 def _elevenlabs_tts(text: str, voice_id: str, tag: str | None) -> AudioSegment:
@@ -168,19 +129,20 @@ def _elevenlabs_tts(text: str, voice_id: str, tag: str | None) -> AudioSegment:
         "Accept": "audio/mpeg",
     }
     payload = {
-        "text": _tagged_text(text, tag),
+        "text": _tagged_text(text, tag) if tag else text,
         "model_id": config.ELEVENLABS_MODEL_ID,
         "voice_settings": _voice_settings(voice_id),
     }
+    seed = _seed_for(voice_id)
+    if seed is not None:
+        payload["seed"] = seed
 
     max_attempts = 5
     last_err = None
     for attempt in range(1, max_attempts + 1):
         try:
-            resp = requests.post(url, json=payload, headers=headers, timeout=90)
+            resp = requests.post(url, json=payload, headers=headers, timeout=120)
         except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            # Transient network blip (connection reset, timeout, etc.) --
-            # back off and retry rather than aborting the whole run.
             last_err = e
             wait = min(2 ** attempt, 20)
             print(f"    [retry {attempt}/{max_attempts}] network error, retrying in {wait}s: {e}")
@@ -188,7 +150,6 @@ def _elevenlabs_tts(text: str, voice_id: str, tag: str | None) -> AudioSegment:
             continue
 
         if resp.status_code == 429:
-            # Rate limited -- back off longer and retry.
             wait = min(5 * attempt, 30)
             print(f"    [retry {attempt}/{max_attempts}] rate limited (429), retrying in {wait}s")
             time.sleep(wait)

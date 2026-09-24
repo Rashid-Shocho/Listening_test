@@ -1,14 +1,12 @@
 """
 Assembles parsed script Segments into final per-test MP3 files:
 
-  turns -> per-line TTS clips -> section track (clean speech, normal
-        turn gaps only -- no ambience, no 30s silence) -> section files
-        concatenated -> Test_N.mp3
+  turns -> grouped per speaker -> TTS clips -> section tracks -> Test.mp3
 
-Every synthesize_line call is given a voice_id resolved from a per-test
-voice_map (speaker -> voice_id), built once by voice_assignment.py at the
-start of build_test_audio() so each speaker's voice is randomized but
-stays fixed for the whole test -- see voice_assignment.py.
+Consecutive lines by the same speaker are merged into one ElevenLabs request
+(up to config.MAX_CHARS_PER_REQUEST characters). Sending each short line on
+its own made v3 re-interpret the voice every time, which is what caused
+characters to drift, sound like a different person, or slip into a whisper.
 """
 
 from __future__ import annotations
@@ -23,66 +21,45 @@ import voice_assignment
 from parser import Segment
 
 
-def _voice_for(turn, voice_map: dict) -> str:
-    key = turn.speaker or "NARRATOR"
+def _voice_for(speaker: str | None, voice_map: dict) -> str:
+    key = speaker or "NARRATOR"
     if key in voice_map:
         return voice_map[key]
-    # Shouldn't happen (voice_map is built from the same turns beforehand),
-    # but if a speaker string is somehow missing, resolve it deterministically
-    # from the key itself rather than calling assign_test_voices() fresh --
-    # that used no seed and would hand back a brand-new random voice every
-    # single time it fired, which is exactly how a 2-person scene could
-    # suddenly pick up an extra, inconsistent voice mid-test. A per-key
-    # seed means the same missing speaker always resolves to the same
-    # voice, even across repeated fallback hits.
-    fallback = voice_assignment.assign_test_voices([key], seed=hash(key) & 0xFFFFFFFF)
+    fallback = voice_assignment.assign_test_voices([key], seed=sum(map(ord, key)))
     return fallback[key]
 
 
-def build_segment_track(segment: Segment, cache_dir: str, voice_map: dict) -> AudioSegment:
-    """
-    Concatenate all turns in one Segment (one original 'file') into audio.
-    "30 SECONDS OF SILENCE" markers are skipped entirely -- no dead air is
-    inserted anywhere in the generated audio.
-    """
-    track = AudioSegment.silent(duration=0)
-    for turn in segment.turns:
-        if turn.kind == "silence":
-            continue
-
-        clip = tts_client.synthesize_line(
-            text=turn.text, voice_id=_voice_for(turn, voice_map), tag=turn.tag, cache_dir=cache_dir
-        )
-        track += clip
-        gap = config.GAP_AFTER_NARRATOR_MS if turn.kind == "narrator" else config.GAP_BETWEEN_TURNS_MS
-        track += AudioSegment.silent(duration=gap)
-    return track
+def _group_turns(turns: list) -> list[dict]:
+    groups: list[dict] = []
+    for t in turns:
+        if t.kind == "silence" or not t.text:
+            continue       # "30 SECONDS OF SILENCE" markers produce no audio
+        piece = tts_client._tagged_text(t.text, t.tag)
+        g = groups[-1] if groups else None
+        if (g and g["speaker"] == t.speaker and g["kind"] == t.kind
+                and len(g["text"]) + len(piece) + 1 <= config.MAX_CHARS_PER_REQUEST):
+            g["text"] += " " + piece
+        else:
+            groups.append({"speaker": t.speaker, "kind": t.kind, "text": piece})
+    return groups
 
 
 def build_section_audio(section_num: int, segments: list, cache_dir: str, voice_map: dict) -> AudioSegment:
-    """
-    Build one full IELTS section (Intro -> Part1 -> Transition -> Part2 ->
-    End). Pure clean speech: no ambience bed of any kind, and "30 SECONDS
-    OF SILENCE" markers are skipped entirely -- just the spoken lines with
-    the normal short gap between turns.
-    """
-    section_track = AudioSegment.silent(duration=0)
-
+    """One full IELTS section: clean speech with normal gaps between turns."""
+    track = AudioSegment.silent(duration=0)
     for seg in segments:
-        seg_audio = AudioSegment.silent(duration=0)
-        for turn in seg.turns:
-            if turn.kind == "silence":
-                continue
+        for g in _group_turns(seg.turns):
             clip = tts_client.synthesize_line(
-                text=turn.text, voice_id=_voice_for(turn, voice_map), tag=turn.tag, cache_dir=cache_dir
+                text=g["text"], voice_id=_voice_for(g["speaker"], voice_map), tag=None, cache_dir=cache_dir
             )
-            seg_audio += clip
-            gap = config.GAP_AFTER_NARRATOR_MS if turn.kind == "narrator" else config.GAP_BETWEEN_TURNS_MS
-            seg_audio += AudioSegment.silent(duration=gap)
+            track += clip
+            gap = config.GAP_AFTER_NARRATOR_MS if g["kind"] == "narrator" else config.GAP_BETWEEN_TURNS_MS
+            track += AudioSegment.silent(duration=gap)
+    return track
 
-        section_track += seg_audio
 
-    return section_track
+def count_requests(sections: dict) -> int:
+    return sum(len(_group_turns(seg.turns)) for segs in sections.values() for seg in segs)
 
 
 def build_test_audio(
@@ -91,32 +68,27 @@ def build_test_audio(
     cache_dir: str,
     output_path: str,
     voice_seed: int | None = None,
+    profiles: dict | None = None,
 ) -> str:
     """
-    sections: {section_num: [Segment, ...]} as returned by parser.parse_test
-    Renders Section 1..4 in order and concatenates them (no crossfade --
-    section boundaries stay clean and obvious) into the final mp3.
-
-    Every speaker (including the narrator) is assigned one random voice_id
-    for the entire test -- see voice_assignment.py -- so nobody's voice
-    changes partway through a section or between sections. Pass voice_seed
-    for a reproducible assignment across repeated runs; leave it None for
-    fresh randomization each time.
+    sections: {section_num: [Segment, ...]} from parser.parse_test.
+    profiles: the test's "speakers" block from the JSON (accent/gender per speaker).
     """
     speakers = voice_assignment.collect_speakers(sections)
-    voice_map = voice_assignment.assign_test_voices(speakers, seed=voice_seed)
+    voice_map = voice_assignment.assign_test_voices(speakers, seed=voice_seed, profiles=profiles)
 
     print(f"  Voice assignment for {test_id}:")
     for speaker, voice_id in sorted(voice_map.items()):
-        print(f"    {speaker}: {voice_id}")
+        p = voice_assignment._profile_for(speaker, profiles)
+        print(f"    {speaker:<36} {p['gender']:<6} {p['accent']:<10} {voice_id}")
+    print(f"  ElevenLabs requests needed: {count_requests(sections)} (cached ones are free)")
 
     full = AudioSegment.silent(duration=0)
     for sec_num in sorted(sections.keys()):
         segs = sections[sec_num]
         if not segs:
             continue
-        sec_audio = build_section_audio(sec_num, segs, cache_dir, voice_map)
-        full += sec_audio
+        full += build_section_audio(sec_num, segs, cache_dir, voice_map)
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     full.export(output_path, format="mp3", bitrate="192k")
